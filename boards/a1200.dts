@@ -1,0 +1,96 @@
+/*
+ * Device Tree Source for the Amiga A1200 with parallel-port and
+ * clockport SPI SD card adapters.
+ *
+ * Each node becomes a struct device in the DDM framework.
+ * The matching engine binds drivers by compatible string, filtered
+ * by bus type. Binding is subsystem-driven: when a controller driver
+ * probes successfully, it registers with its subsystem, which
+ * enumerates the controller's device-tree children, sets their bus
+ * type, and matches them inline — so the whole chain binds in one pass.
+ *
+ * Both adapter trees live under root as siblings. The matching engine
+ * probes each independently — if SPIder hardware is absent, its probe
+ * returns -1 (IDENT mismatch) and that branch stays unmatched; the
+ * par-spi branch still works.
+ *
+ *   root
+ *   ├── cia-parallelport    (platform bus; cia-parallelport.library)
+ *   │   │                    Probes: claims CIA hardware, registers
+ *   │   │                    an IRQ controller (CIA-A FLAG edge) and
+ *   │   │                    a parallel port controller.
+ *   │   └── par-spi-adapter  (parallel-port bus; par-spi.library)
+ *   │       │                Probes: registers as SPI controller,
+ *   │       │                GPIO controller (card-detect pin), and
+ *   │       │                cascaded IRQ controller — all on this node.
+ *   │       └── mmc-spi@0    (SPI bus; mmc-spi.device)
+ *   │                        SD/MMC card on chip select 0.
+ *   │
+ *   └── gayle-clockport      (platform bus; gayle-clockport.library)
+ *       │                    Probes: claims clockport memory region,
+ *       │                    registers a clockport controller and an
+ *       │                    IRQ controller (Amiga system interrupt).
+ *       └── spider           (clockport bus; spider.library)
+ *           │                Probes: probes SPIder firmware via IDENT,
+ *           │                registers as SPI controller, GPIO
+ *           │                controller (card-detect pin), and cascaded
+ *           │                IRQ controller.
+ *           └── mmc-spi@0    (SPI bus; mmc-spi.device)
+ *                            SD/MMC card on chip select 0.
+ *                            device-unit = <1> to avoid collision
+ *                            with the par-spi mmc-spi unit 0.
+ */
+
+/ {
+    cia_parallelport: cia-parallelport {
+        compatible = "amiga,cia-parallelport";
+        interrupt-controller;
+        #interrupt-cells = <2>;
+
+        par_spi: par-spi-adapter {
+            compatible = "amiga,par-spi-adapter";
+
+            #gpio-cells = <2>;
+            gpio-controller;
+
+            #interrupt-cells = <2>;
+            interrupt-controller;
+            interrupt-parent = <&cia_parallelport>;
+            interrupts = <0 2>;   /* hwirq 0 (ACK/FLAG), edge falling */
+
+            mmc-spi@0 {
+                compatible = "mmc-spi";
+                device-unit = <0>;
+                reg = <0>;
+                spi-max-frequency = <16000000>;
+                cd-gpios = <&par_spi 0 0>;
+            };
+        };
+    };
+
+    gayle_clockport: gayle-clockport {
+        compatible = "amiga,gayle-clockport";
+        reg = <0xD80001>;
+        interrupt-controller;
+        #interrupt-cells = <2>;
+
+        spider: spider {
+            compatible = "amiga,spider";
+            interrupt-parent = <&gayle_clockport>;
+            interrupts = <0 8>;   /* level low, open-drain (shared) */
+
+            #gpio-cells = <2>;
+            gpio-controller;
+            #interrupt-cells = <2>;
+            interrupt-controller;
+
+            mmc-spi@0 {
+                compatible = "mmc-spi";
+                device-unit = <1>;
+                reg = <0>;
+                spi-max-frequency = <16000000>;
+                cd-gpios = <&spider 0 0>;
+            };
+        };
+    };
+};
