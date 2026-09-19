@@ -92,6 +92,15 @@ int DT_GetInterrupt(struct DDMBase *ddm __asm("a6"), struct device *dev __asm("a
  * DT_GetInterrupt. A thin wrapper over IRQ_DisposeMapping. */
 void DT_FreeInterrupt(struct DDMBase *ddm __asm("a6"), int virq __asm("d0"));
 
+/* LVO -318: Parse a device tree overlay file and graft child nodes
+ * onto matching Zorro boards by manufacturer/product ID. The overlay
+ * file contains fragment@N nodes with a zorro-match property (two u32s:
+ * manufacturer, product) and child nodes to graft onto matching
+ * boards. reg offsets are converted to absolute addresses by adding
+ * the board's base address. Returns 0 on success, -1 on failure
+ * (including file-not-found, which is non-fatal). */
+int32_t DT_ApplyOverlay(struct DDMBase *ddm __asm("a6"), const char *filename __asm("a0"));
+
 /* ------------------------------------------------------------------ */
 /* LVO stub macros                                                    */
 /*                                                                    */
@@ -111,6 +120,7 @@ void DT_FreeInterrupt(struct DDMBase *ddm __asm("a6"), int virq __asm("d0"));
 #define DT_GetPropertyU32(ddm, dev, name, out) __DDM_LVO_RET_3A0A1D0(int32_t, -216, (ddm), (dev), (name), (out))
 #define DT_GetInterrupt(ddm, dev, index) __DDM_LVO_RET_2A0D0(int, -222, (ddm), (dev), (index))
 #define DT_FreeInterrupt(ddm, virq) __DDM_LVO_VOID_1D0(-228, (ddm), (virq))
+#define DT_ApplyOverlay(ddm, filename) __DDM_LVO_RET_1A0(int32_t, -318, (ddm), (filename))
 
 #endif /* !DDM_INTERNAL */
 

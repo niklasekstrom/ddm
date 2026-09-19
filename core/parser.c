@@ -41,6 +41,7 @@
 #include "ddm_protos.h"
 #include "ddm_util.h"
 #include "devicetree.h"
+#include "parser_internal.h"
 
 extern struct ExecBase *SysBase;
 
@@ -114,6 +115,8 @@ struct parser_state
     struct phandle_ref *phandle_refs;
     int num_phandle_refs;
     int cap_phandle_refs;
+    int skip_register; /* TRUE for overlay parsing: link children
+                        * manually instead of calling DDM_RegisterDevice */
 };
 
 static int grow_phandle_refs(struct parser_state *ps);
@@ -497,41 +500,9 @@ fail:
 /* ------------------------------------------------------------------ */
 /* Property creation                                                  */
 /* ------------------------------------------------------------------ */
-
-static struct dt_property *create_property(const char *name, uint8_t *value, uint32_t length)
-{
-    struct dt_property *prop = (struct dt_property *)AllocMem(sizeof(struct dt_property), MEMF_ANY | MEMF_CLEAR);
-    if (!prop)
-        return NULL;
-
-    prop->name = ddm_strdup(name);
-    if (!prop->name)
-    {
-        FreeMem(prop, sizeof(struct dt_property));
-        return NULL;
-    }
-
-    prop->length = length;
-    if (length > 0)
-    {
-        prop->value = (uint8_t *)AllocMem(length, MEMF_ANY | MEMF_CLEAR);
-        if (!prop->value)
-        {
-            FreeMem(prop->name, ddm_strlen(prop->name) + 1);
-            FreeMem(prop, sizeof(struct dt_property));
-            return NULL;
-        }
-        for (uint32_t i = 0; i < length; i++)
-            prop->value[i] = value[i];
-    }
-    else
-    {
-        prop->value = NULL;
-    }
-
-    prop->next = NULL;
-    return prop;
-}
+/* The create_property / create_device / add_property helpers have been
+ * moved to ddm_util.c as ddm_create_property / ddm_create_device /
+ * ddm_add_property so that overlay.c can reuse them. */
 
 static void __attribute__((unused)) free_property(struct dt_property *prop)
 {
@@ -547,62 +518,8 @@ static void __attribute__((unused)) free_property(struct dt_property *prop)
 /* ------------------------------------------------------------------ */
 /* Device creation                                                    */
 /* ------------------------------------------------------------------ */
-
-static struct device *create_device(const char *name)
-{
-    struct device *dev = (struct device *)AllocMem(sizeof(struct device), MEMF_ANY | MEMF_CLEAR);
-    if (!dev)
-        return NULL;
-
-    dev->node.ln_Name = ddm_strdup(name);
-    if (!dev->node.ln_Name)
-    {
-        FreeMem(dev, sizeof(struct device));
-        return NULL;
-    }
-
-    /* Create a device_node to hold the device-tree-specific data
-     * (name, path, properties). Link it via of_node. */
-    struct device_node *dn = (struct device_node *)AllocMem(sizeof(struct device_node), MEMF_ANY | MEMF_CLEAR);
-    if (!dn)
-    {
-        FreeMem(dev->node.ln_Name, ddm_strlen(dev->node.ln_Name) + 1);
-        FreeMem(dev, sizeof(struct device));
-        return NULL;
-    }
-    dn->name = ddm_strdup(name);
-    dn->path = NULL;
-    dn->properties = NULL;
-
-    dev->of_node = dn;
-    dev->parent = NULL;
-    dev->children = NULL;
-    dev->next_sibling = NULL;
-    dev->driver = NULL;
-    dev->driver_data = NULL;
-    dev->bus_data = NULL;
-    dev->bus_type = BUS_TYPE_PLATFORM;
-    dev->flags = DEV_FLAG_FROM_TREE;
-    return dev;
-}
-
-/* Add a property to a device's of_node (appends to the end of the list) */
-static void add_property(struct device *dev, struct dt_property *prop)
-{
-    if (!dev->of_node)
-        return;
-    if (!dev->of_node->properties)
-    {
-        dev->of_node->properties = prop;
-    }
-    else
-    {
-        struct dt_property *p = dev->of_node->properties;
-        while (p->next)
-            p = p->next;
-        p->next = prop;
-    }
-}
+/* create_device and add_property are now provided by ddm_util.c as
+ * ddm_create_device / ddm_add_property. */
 
 /* ------------------------------------------------------------------ */
 /* Node parsing                                                       */
@@ -659,10 +576,23 @@ static int register_label(struct parser_state *ps, const char *label, struct dev
 /* Find a device by label (for phandle resolution) */
 static struct device *find_by_label(struct parser_state *ps, const char *label)
 {
+    /* First check the parser's local labels (current file's labels) */
     for (int i = 0; i < ps->num_labels; i++)
     {
         if (ddm_strcmp(ps->labels[i].label, label) == 0)
             return ps->labels[i].dev;
+    }
+    /* Fall back to persisted main-tree labels on DDMBase (allows
+     * overlay files to cross-reference devices from the main DTS). */
+    if (ps->ddm && ps->ddm->dt_labels.lh_Head)
+    {
+        struct Node *n = ps->ddm->dt_labels.lh_Head;
+        while (n && n != (struct Node *)ps->ddm->dt_labels.lh_TailPred)
+        {
+            if (ddm_strcmp(n->ln_Name, label) == 0)
+                return ((struct dt_label *)n)->dev;
+            n = n->ln_Succ;
+        }
     }
     return NULL;
 }
@@ -723,7 +653,7 @@ static int parse_node_body(struct parser_state *ps, struct device *parent)
             /* It's a child node */
             consume_token(ps); /* consume '{' */
 
-            struct device *child = create_device(name);
+            struct device *child = ddm_create_device(name);
             if (!child)
             {
                 if (label)
@@ -739,12 +669,22 @@ static int parse_node_body(struct parser_state *ps, struct device *parent)
                 FreeMem(label, ddm_strlen(label) + 1);
             }
 
-            /* Register the device in the DDM */
-            if (!DDM_RegisterDevice(ps->ddm, child))
+            /* Register the device in the DDM, or link manually when
+             * skip_register is set (overlay parsing — the caller
+             * controls registration). */
+            if (ps->skip_register)
             {
-                DDM_UnregisterDevice(ps->ddm, child);
-                FreeMem(name, ddm_strlen(name) + 1);
-                return -1;
+                child->next_sibling = parent->children;
+                parent->children = child;
+            }
+            else
+            {
+                if (!DDM_RegisterDevice(ps->ddm, child))
+                {
+                    DDM_UnregisterDevice(ps->ddm, child);
+                    FreeMem(name, ddm_strlen(name) + 1);
+                    return -1;
+                }
             }
 
             FreeMem(name, ddm_strlen(name) + 1);
@@ -790,10 +730,10 @@ static int parse_node_body(struct parser_state *ps, struct device *parent)
             }
             consume_token(ps);
 
-            /* Create and add the property (create_property copies the data) */
-            struct dt_property *prop = create_property(name, value_buf, value_len);
+            /* Create and add the property (ddm_create_property copies the data) */
+            struct dt_property *prop = ddm_create_property(name, value_buf, value_len);
             if (prop)
-                add_property(parent, prop);
+                ddm_add_property(parent, prop);
 
             /* Associate any new phandle refs with this device+property */
             for (int i = refs_before; i < ps->num_phandle_refs; i++)
@@ -811,9 +751,9 @@ static int parse_node_body(struct parser_state *ps, struct device *parent)
         {
             /* Boolean property (no value), e.g. "interrupt-controller;" */
             consume_token(ps);
-            struct dt_property *prop = create_property(name, NULL, 0);
+            struct dt_property *prop = ddm_create_property(name, NULL, 0);
             if (prop)
-                add_property(parent, prop);
+                ddm_add_property(parent, prop);
             FreeMem(name, ddm_strlen(name) + 1);
             if (label)
                 FreeMem(label, ddm_strlen(label) + 1);
@@ -834,9 +774,9 @@ static int parse_node_body(struct parser_state *ps, struct device *parent)
 /* ------------------------------------------------------------------ */
 
 /* Read a file into memory. Returns allocated buffer and its length.
- * Returns NULL on failure.
+ * Returns NULL on failure. Non-static so overlay.c can reuse it.
  */
-static char *read_file(const char *filename, uint32_t *out_len)
+char *dt_read_file(const char *filename, uint32_t *out_len)
 {
     BPTR fh = Open((STRPTR)filename, MODE_OLDFILE);
     if (!fh)
@@ -919,94 +859,82 @@ static char *read_file(const char *filename, uint32_t *out_len)
 }
 
 /* ------------------------------------------------------------------ */
-/* LVO -198: DT_ParseTree                                            */
+/* Internal parsing core (shared by DT_ParseTree and overlay parser) */
 /* ------------------------------------------------------------------ */
 
-int32_t DT_ParseTree(struct DDMBase *ddm __asm("a6"), const char *filename __asm("a0"))
+int32_t parse_tree_internal(struct DDMBase *ddm, const char *src, uint32_t file_len,
+                            struct device *root, int skip_register,
+                            struct parser_state **out_ps)
 {
-    DBG_DT("DT: ParseTree '%s'\n", filename);
-    uint32_t file_len = 0;
-    char *src = read_file(filename, &file_len);
-    if (!src)
+    (void)file_len; /* src is already NUL-terminated; length not needed here */
+
+    struct parser_state *ps = (struct parser_state *)AllocMem(sizeof(struct parser_state), MEMF_ANY | MEMF_CLEAR);
+    if (!ps)
     {
-        DBG_DT("DT: ERR: failed to read '%s'\n", filename);
+        *out_ps = NULL;
         return -1;
     }
-    DBG_DT("DT: parsed %lu bytes\n", file_len);
 
-    struct parser_state ps;
-    ps.src = src;
-    ps.pos = 0;
-    ps.line = 1;
-    ps.cur_tok.text = NULL;
-    ps.cur_tok.type = TOK_EOF;
-    ps.ddm = ddm;
-    ps.num_labels = 0;
-    ps.cap_labels = INITIAL_LABELS;
-    ps.labels = (struct label_entry *)AllocMem(ps.cap_labels * sizeof(struct label_entry), MEMF_ANY | MEMF_CLEAR);
-    ps.num_phandle_refs = 0;
-    ps.cap_phandle_refs = INITIAL_PHANDLE_REFS;
-    ps.phandle_refs =
-        (struct phandle_ref *)AllocMem(ps.cap_phandle_refs * sizeof(struct phandle_ref), MEMF_ANY | MEMF_CLEAR);
-    if (!ps.labels || !ps.phandle_refs)
+    ps->src = src;
+    ps->pos = 0;
+    ps->line = 1;
+    ps->cur_tok.text = NULL;
+    ps->cur_tok.type = TOK_EOF;
+    ps->ddm = ddm;
+    ps->num_labels = 0;
+    ps->cap_labels = INITIAL_LABELS;
+    ps->labels = (struct label_entry *)AllocMem(ps->cap_labels * sizeof(struct label_entry), MEMF_ANY | MEMF_CLEAR);
+    ps->num_phandle_refs = 0;
+    ps->cap_phandle_refs = INITIAL_PHANDLE_REFS;
+    ps->phandle_refs =
+        (struct phandle_ref *)AllocMem(ps->cap_phandle_refs * sizeof(struct phandle_ref), MEMF_ANY | MEMF_CLEAR);
+    ps->skip_register = skip_register;
+    if (!ps->labels || !ps->phandle_refs)
         goto fail;
 
     /* Read first token */
-    if (next_token(&ps) < 0)
+    if (next_token(ps) < 0)
         goto fail;
 
     /* Expect '/' for root */
-    struct token *tok = peek_token(&ps);
+    struct token *tok = peek_token(ps);
     if (tok->type != TOK_SLASH)
         goto fail;
-    consume_token(&ps);
+    consume_token(ps);
 
     /* Expect '{' */
-    tok = peek_token(&ps);
+    tok = peek_token(ps);
     if (tok->type != TOK_LBRACE)
         goto fail;
-    consume_token(&ps);
+    consume_token(ps);
 
-    /* Create root device */
-    struct device *root = create_device("");
-    if (!root)
-        goto fail;
-    root->node.ln_Name = ddm_strdup("/");
-    root->parent = NULL;
-
-    if (!DDM_RegisterDevice(ddm, root))
-    {
-        DDM_UnregisterDevice(ddm, root);
-        goto fail;
-    }
-
-    /* Parse root body */
-    if (parse_node_body(&ps, root) < 0)
+    /* Parse root body (root device is created by the caller) */
+    if (parse_node_body(ps, root) < 0)
         goto fail;
 
     /* Optional semicolon after the root node (e.g. "};\n") */
-    tok = peek_token(&ps);
+    tok = peek_token(ps);
     if (tok->type == TOK_SEMICOLON)
-        consume_token(&ps);
+        consume_token(ps);
 
     /* Expect EOF */
-    tok = peek_token(&ps);
+    tok = peek_token(ps);
     if (tok->type != TOK_EOF)
         goto fail;
 
     /* Pass 2: resolve phandle references.
      * For each phandle ref, find the device by label and store its
      * pointer as a big-endian u32 in the property value. */
-    for (int i = 0; i < ps.num_phandle_refs; i++)
+    for (int i = 0; i < ps->num_phandle_refs; i++)
     {
-        struct phandle_ref *ref = &ps.phandle_refs[i];
+        struct phandle_ref *ref = &ps->phandle_refs[i];
         if (!ref->prop || !ref->label)
             continue;
-        struct device *target = find_by_label(&ps, ref->label);
+        struct device *target = find_by_label(ps, ref->label);
         if (target)
         {
             /* Store the device pointer as a big-endian u32 */
-            uint32_t val = (uint32_t)target;
+            uint32_t val = (uint32_t)(uintptr_t)target;
             ref->prop->value[ref->offset] = (uint8_t)(val >> 24);
             ref->prop->value[ref->offset + 1] = (uint8_t)(val >> 16);
             ref->prop->value[ref->offset + 2] = (uint8_t)(val >> 8);
@@ -1014,37 +942,98 @@ int32_t DT_ParseTree(struct DDMBase *ddm __asm("a6"), const char *filename __asm
         }
     }
 
-    /* Free parser state */
-    if (ps.cur_tok.text)
-        FreeMem(ps.cur_tok.text, ddm_strlen(ps.cur_tok.text) + 1);
-    for (int i = 0; i < ps.num_labels; i++)
-        FreeMem(ps.labels[i].label, ddm_strlen(ps.labels[i].label) + 1);
-    for (int i = 0; i < ps.num_phandle_refs; i++)
-        if (ps.phandle_refs[i].label)
-            FreeMem(ps.phandle_refs[i].label, ddm_strlen(ps.phandle_refs[i].label) + 1);
-    if (ps.labels)
-        FreeMem(ps.labels, ps.cap_labels * sizeof(struct label_entry));
-    if (ps.phandle_refs)
-        FreeMem(ps.phandle_refs, ps.cap_phandle_refs * sizeof(struct phandle_ref));
-    FreeMem(src, file_len + 1);
+    /* Return parser state to caller (they own cleanup now) */
+    *out_ps = ps;
     return 0;
 
 fail:
-    if (ps.cur_tok.text)
-        FreeMem(ps.cur_tok.text, ddm_strlen(ps.cur_tok.text) + 1);
-    if (ps.labels)
-    {
-        for (int i = 0; i < ps.num_labels; i++)
-            FreeMem(ps.labels[i].label, ddm_strlen(ps.labels[i].label) + 1);
-        FreeMem(ps.labels, ps.cap_labels * sizeof(struct label_entry));
-    }
-    if (ps.phandle_refs)
-    {
-        for (int i = 0; i < ps.num_phandle_refs; i++)
-            if (ps.phandle_refs[i].label)
-                FreeMem(ps.phandle_refs[i].label, ddm_strlen(ps.phandle_refs[i].label) + 1);
-        FreeMem(ps.phandle_refs, ps.cap_phandle_refs * sizeof(struct phandle_ref));
-    }
-    FreeMem(src, file_len + 1);
+    dt_free_parser_state(ps);
+    *out_ps = NULL;
     return -1;
+}
+
+/* Free a parser_state returned by parse_tree_internal, including all
+ * internal resources and the struct itself. Does NOT free the source
+ * buffer or the parsed device tree. NULL-safe. */
+void dt_free_parser_state(struct parser_state *ps)
+{
+    if (!ps)
+        return;
+    if (ps->cur_tok.text)
+        FreeMem(ps->cur_tok.text, ddm_strlen(ps->cur_tok.text) + 1);
+    if (ps->labels)
+    {
+        for (int i = 0; i < ps->num_labels; i++)
+            if (ps->labels[i].label)
+                FreeMem(ps->labels[i].label, ddm_strlen(ps->labels[i].label) + 1);
+        FreeMem(ps->labels, ps->cap_labels * sizeof(struct label_entry));
+    }
+    if (ps->phandle_refs)
+    {
+        for (int i = 0; i < ps->num_phandle_refs; i++)
+            if (ps->phandle_refs[i].label)
+                FreeMem(ps->phandle_refs[i].label, ddm_strlen(ps->phandle_refs[i].label) + 1);
+        FreeMem(ps->phandle_refs, ps->cap_phandle_refs * sizeof(struct phandle_ref));
+    }
+    FreeMem(ps, sizeof(struct parser_state));
+}
+
+/* ------------------------------------------------------------------ */
+/* LVO -198: DT_ParseTree                                            */
+/* ------------------------------------------------------------------ */
+
+int32_t DT_ParseTree(struct DDMBase *ddm __asm("a6"), const char *filename __asm("a0"))
+{
+    DBG_DT("DT: ParseTree '%s'\n", filename);
+    uint32_t file_len = 0;
+    char *src = dt_read_file(filename, &file_len);
+    if (!src)
+    {
+        DBG_DT("DT: ERR: failed to read '%s'\n", filename);
+        return -1;
+    }
+    DBG_DT("DT: parsed %lu bytes\n", file_len);
+
+    /* Create root device */
+    struct device *root = ddm_create_device("");
+    if (!root)
+    {
+        FreeMem(src, file_len + 1);
+        return -1;
+    }
+    root->node.ln_Name = ddm_strdup("/");
+    root->parent = NULL;
+
+    if (!DDM_RegisterDevice(ddm, root))
+    {
+        DDM_UnregisterDevice(ddm, root);
+        FreeMem(src, file_len + 1);
+        return -1;
+    }
+
+    struct parser_state *ps = NULL;
+    if (parse_tree_internal(ddm, src, file_len, root, FALSE, &ps) < 0)
+    {
+        DDM_UnregisterDevice(ddm, root);
+        FreeMem(src, file_len + 1);
+        return -1;
+    }
+
+    /* Persist labels to ddm->dt_labels so overlay files can
+     * cross-reference main-tree devices via phandle properties. */
+    for (int i = 0; i < ps->num_labels; i++)
+    {
+        struct dt_label *dl = (struct dt_label *)AllocMem(sizeof(struct dt_label), MEMF_ANY | MEMF_CLEAR);
+        if (!dl)
+            break;
+        dl->node.ln_Name = ps->labels[i].label; /* transfer ownership */
+        dl->dev = ps->labels[i].dev;
+        AddTail(&ddm->dt_labels, &dl->node);
+        ps->labels[i].label = NULL; /* mark as transferred */
+    }
+
+    /* Free parser state (labels already transferred or freed here) */
+    dt_free_parser_state(ps);
+    FreeMem(src, file_len + 1);
+    return 0;
 }

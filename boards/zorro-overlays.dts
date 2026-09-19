@@ -1,0 +1,85 @@
+/*
+ * Device Tree Overlay for Zorro expansion boards.
+ *
+ * This file is parsed by DT_ApplyOverlay after the main device tree
+ * (a1200.dts) and after Zorro board enumeration (zorro_enumerate).
+ * Each fragment@N node describes sub-devices that live on a Zorro
+ * board but cannot be auto-discovered — they are grafted onto the
+ * matching board's device node.
+ *
+ * A fragment matches a Zorro board by manufacturer/product ID:
+ *
+ *   zorro-match = <manufacturer product>;
+ *
+ * The reg property of direct children is treated as an offset from
+ * the board's base address and is converted to an absolute address
+ * (board_base + offset) when the fragment is grafted.
+ *
+ * Phandle references (e.g. interrupt-parent = <&label>) work across
+ * the overlay and the main tree. Labels defined in the main tree
+ * (a1200.dts) are visible here, and labels defined in this overlay
+ * are visible within this overlay.
+ *
+ * Example: a Zorro II board (manufacturer 0x0828, product 0x0022)
+ * with a clockport at offset 0x8000 and a SPIder module on it.
+ * The board's interrupt is routed to INT6 (INTB_EXTER=13).
+ *
+ *   root
+ *   └── zorro@828-22              (created by zorro_enumerate)
+ *       │                          reg = <0xE80000>  (board base)
+ *       │                          manufacturer-id = <0x0828>
+ *       │                          product-id = <0x22>
+ *       │                          board-type = "zorro2"
+ *       │
+ *       └── clockport@8000         (grafted from fragment@0)
+ *           │                      reg = <0xE88000>  (base + 0x8000)
+ *           │                      amiga-interrupt = <13>
+ *           │                      interrupt-controller
+ *           │
+ *           └── spider             (grafted from fragment@0)
+ *               │                  interrupt-parent = <&zorro_cp>
+ *               │                  interrupts = <0 8>
+ *               │
+ *               └── mmc-spi@0      (grafted from fragment@0)
+ *                                  reg = <0>
+ *                                  spi-max-frequency = <16000000>
+ */
+
+/ {
+    fragment@0 {
+        /* Match Zorro board by manufacturer/product ID.
+         * Example: manufacturer 0x0828, product 0x0022 */
+        zorro-match = <0x0828 0x0022>;
+
+        /* Clockport at offset 0x8000 from board base.
+         * reg is adjusted to absolute address (board_base + 0x8000)
+         * when grafted. amiga-interrupt selects the Amiga system
+         * interrupt line (13 = INTB_EXTER / INT6). */
+        zorro_cp: clockport@8000 {
+            compatible = "amiga,gayle-clockport";
+            reg = <0x8000>;
+            amiga-interrupt = <13>;
+            interrupt-controller;
+            #interrupt-cells = <2>;
+
+            spider: spider {
+                compatible = "amiga,spider";
+                interrupt-parent = <&zorro_cp>;
+                interrupts = <0 8>;   /* level low, open-drain (shared) */
+
+                #gpio-cells = <2>;
+                gpio-controller;
+                #interrupt-cells = <2>;
+                interrupt-controller;
+
+                mmc-spi@0 {
+                    compatible = "mmc-spi";
+                    device-unit = <2>;
+                    reg = <0>;
+                    spi-max-frequency = <16000000>;
+                    cd-gpios = <&spider 0 0>;
+                };
+            };
+        };
+    };
+};

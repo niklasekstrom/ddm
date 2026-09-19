@@ -50,6 +50,10 @@ struct gayle_cp_instance
     struct irq_domain *irq_domain;        /* Domain for this instance */
     int parent_virq;                      /* virq for hwirq 0 (the single
                                            * clockport interrupt) */
+    int16_t amiga_int;                    /* Amiga system interrupt bit
+                                           * (e.g. INTB_EXTER=13 for INT6).
+                                           * Read from DT "amiga-interrupt"
+                                           * property, default INTB_EXTER. */
 };
 
 /* The compatible strings this driver matches */
@@ -163,7 +167,7 @@ static void gayle_irq_startup(struct irq_chip *chip __asm("a0"), uint32_t hwirq 
     /* Register the Amiga system interrupt server. This is called by
      * the framework (via chip_startup) when the first child chains on
      * this controller's virq, or when a direct handler is added. */
-    AddIntServer(INTB_EXTER, &inst->clockport_isr);
+    AddIntServer(inst->amiga_int, &inst->clockport_isr);
 }
 
 static void gayle_irq_shutdown(struct irq_chip *chip __asm("a0"), uint32_t hwirq __asm("d0"))
@@ -175,7 +179,7 @@ static void gayle_irq_shutdown(struct irq_chip *chip __asm("a0"), uint32_t hwirq
     /* Remove the Amiga system interrupt server. This is called by
      * the framework (via chip_shutdown) when the last child unchains
      * or the domain is destroyed. */
-    RemIntServer(INTB_EXTER, &inst->clockport_isr);
+    RemIntServer(inst->amiga_int, &inst->clockport_isr);
 }
 
 static void gayle_irq_mask(struct irq_chip *chip __asm("a0"), uint32_t hwirq __asm("d0"))
@@ -236,6 +240,18 @@ int32_t gayle_cp_probe(struct Library *lib __asm("a6"), struct device *dev __asm
     DT_GetPropertyU32(DDMBase, dev, "reg", &base_addr);
     inst->base = (volatile uint8_t *)base_addr;
     DBG_GAYLE("GAYLE-CP: base=0x%08lx\n", base_addr);
+
+    /* Read the Amiga system interrupt bit from the device tree
+     * "amiga-interrupt" property. Default to INTB_EXTER (13 = INT6)
+     * for the on-board Gayle clockport. Zorro boards with a
+     * clockport may route the interrupt to a different line. */
+    inst->amiga_int = INTB_EXTER;
+    {
+        uint32_t int_val = (uint32_t)INTB_EXTER;
+        if (DT_GetPropertyU32(DDMBase, dev, "amiga-interrupt", &int_val) == 0)
+            inst->amiga_int = (int16_t)int_val;
+    }
+    DBG_GAYLE("GAYLE-CP: amiga_int=%ld\n", (long)inst->amiga_int);
 
     /* Register the interrupt controller on this device node.
      * Descendants (e.g. spider) reference it via

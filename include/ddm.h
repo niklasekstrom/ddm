@@ -40,6 +40,16 @@ struct loaded_lib
     int16_t is_device;     /* TRUE if opened via OpenDevice */
 };
 
+/* A device-tree label, persisted on DDMBase.dt_labels after the main
+ * DTS is parsed so that overlay files can cross-reference main-tree
+ * devices via phandle properties (e.g. interrupt-parent = <&label>).
+ * ln_Name is the label string (ddm_strdup'd); dev is the target. */
+struct dt_label
+{
+    struct Node node;   /* ln_Name = label string */
+    struct device *dev; /* Device the label refers to */
+};
+
 /* ------------------------------------------------------------------ */
 /* Bus type constants                                                  */
 /* ------------------------------------------------------------------ */
@@ -51,6 +61,7 @@ struct loaded_lib
 #define BUS_TYPE_MMC 4
 #define BUS_TYPE_GPIO 5
 #define BUS_TYPE_CLOCKPORT 6
+#define BUS_TYPE_ZORRO 7
 
 /* ------------------------------------------------------------------ */
 /* Device flags                                                        */
@@ -181,6 +192,12 @@ struct DDMBase
      * loader (read_config_file). ddm_expunge walks this list and
      * closes each entry before freeing the library base. */
     struct List loaded_libs;
+
+    /* Device-tree labels from the main DTS, persisted after parsing
+     * so overlay files can cross-reference main-tree devices via
+     * phandle properties (e.g. interrupt-parent = <&label>). Populated
+     * by DT_ParseTree; entries are struct dt_label. */
+    struct List dt_labels;
 };
 
 /* Capacity of the global virq space. This is a deliberate compile-time

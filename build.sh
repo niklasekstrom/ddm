@@ -84,7 +84,7 @@ mkdir -p "$BUILD"
 
 echo "Building ddm.library..."
 ( cd "$ROOT/core" && $CC $CFLAGS -I../include \
-    model.c driver.c config.c irq.c romtag.c devicetree.c parser.c gpio.c ddm_util.c \
+    model.c driver.c config.c irq.c romtag.c devicetree.c parser.c gpio.c ddm_util.c zorro.c overlay.c \
     $LIBS -o "$BUILD/ddm.library" ) || exit 1
 
 echo "Building spi.library..."

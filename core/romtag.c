@@ -70,6 +70,7 @@ int32_t DT_GetPropertyU32(struct DDMBase *ddm __asm("a6"), struct device *dev __
                           uint32_t *out __asm("d0"));
 int DT_GetInterrupt(struct DDMBase *ddm __asm("a6"), struct device *dev __asm("a0"), uint32_t index __asm("d0"));
 void DT_FreeInterrupt(struct DDMBase *ddm __asm("a6"), int virq __asm("d0"));
+int32_t DT_ApplyOverlay(struct DDMBase *ddm __asm("a6"), const char *filename __asm("a0"));
 
 /* GPIO framework functions (implemented in gpio.c, exposed as LVOs -234..-312) */
 int32_t GPIO_RegisterController(struct DDMBase *ddm __asm("a6"), struct gpio_controller *ctrl __asm("a0"));
@@ -167,6 +168,7 @@ static uint32_t library_vectors[] = {
     (uint32_t)GPIO_GetRawValue,          /* -300 */
     (uint32_t)GPIO_SetRawValue,          /* -306 */
     (uint32_t)GPIO_SetConfig,            /* -312 */
+    (uint32_t)DT_ApplyOverlay,            /* -318 */
     -1,
 };
 
@@ -273,6 +275,7 @@ static struct DDMBase *ddm_init(struct ExecBase *sys_base __asm("a6"), BPTR seg_
     NewList(&ddm->bus_types);
     NewList(&ddm->controllers);
     NewList(&ddm->loaded_libs);
+    NewList(&ddm->dt_labels);
 
     ddm->root = NULL;
     ddm->deferred_count = 0;

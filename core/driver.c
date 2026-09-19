@@ -14,6 +14,7 @@
 #include "ddm_protos.h" /* DDM_LoadConfig LVO stub */
 #include "ddm_util.h"
 #include "devicetree.h" /* struct dt_property, DT_ParseTree LVO stub */
+#include "zorro.h"      /* zorro_enumerate */
 
 extern struct DDMBase *DDMBase;
 
@@ -128,7 +129,15 @@ struct device_driver *DDM_RegisterDriver(struct DDMBase *ddm __asm("a6"), struct
         ddm->bootstrap_trigger = drv->node.ln_Name;
 
         if (DT_ParseTree(ddm, "DEVS:a1200.dts") == 0)
+        {
+            /* Enumerate Zorro boards via expansion.library and apply
+             * device tree overlays that describe sub-devices on those
+             * boards (e.g. clockports, SPI controllers). */
+            zorro_enumerate(ddm);
+            DT_ApplyOverlay(ddm, "DEVS:zorro-overlays.dts");
+
             DDM_LoadConfig(ddm, "DEVS:ddm.conf");
+        }
 
         /* Mark as done regardless of success/failure to prevent
          * retry loops on every subsequent registration. */

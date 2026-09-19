@@ -37,6 +37,53 @@ references its card-detect pin via `cd-gpios = <&par_spi 0 0>` /
 `<&spider 0 0>`. The card-change interrupt is derived from that GPIO at
 runtime via `GPIO_ToIrq` rather than via an `interrupt-parent` property.
 
+### Zorro Expansion Boards
+
+Zorro boards are auto-configured by `expansion.library` at boot, but
+their sub-devices (e.g. clockports, SPI controllers) are not
+enumerable — they must be described by a device tree overlay. The DDM
+handles this in three steps during bootstrap:
+
+1. **Main tree** (`DEVS:a1200.dts`) is parsed, describing on-board
+   devices (CIA parallel port, Gayle clockport, etc.).
+
+2. **Zorro enumeration** (`zorro_enumerate`) opens `expansion.library`
+   and calls `FindConfigDev` to discover all Zorro boards. Each board
+   becomes a `struct device` with `bus_type = BUS_TYPE_ZORRO` and
+   properties: `manufacturer-id`, `product-id`, `serial-number`,
+   `reg` (absolute base address), `board-size`, `board-type`
+   (`"zorro2"` or `"zorro3"`), and `compatible = "zorro"`.
+
+3. **Overlay application** (`DT_ApplyOverlay` on `DEVS:zorro-overlays.dts`)
+   parses the overlay file, which contains `fragment@N` nodes. Each
+   fragment has a `zorro-match = <manufacturer product>` property and
+   child nodes to graft onto the matching board. The `reg` property of
+   direct children is treated as an offset from the board base and is
+   converted to an absolute address when grafted. Phandle references
+   (e.g. `interrupt-parent = <&label>`) work across the overlay and
+   the main tree.
+
+```text
+root
+├── (main tree devices: cia-parallelport, gayle-clockport, ...)
+│
+└── zorro-bus                         (created by zorro_enumerate)
+    └── zorro@828-22                   (Zorro II board, manuf=0x0828, product=0x22)
+        │                              reg = <0xE80000>  (board base)
+        │
+        └── clockport@8000             (grafted from overlay fragment@0)
+            │                          reg = <0xE88000>  (base + 0x8000)
+            │                          amiga-interrupt = <13>  (INT6)
+            │
+            └── spider                  (grafted from overlay)
+                └── mmc-spi@0           (grafted from overlay)
+```
+
+The `amiga-interrupt` property on a clockport node selects which Amiga
+system interrupt line the board uses (default `INTB_EXTER` = 13 = INT6
+for the on-board Gayle clockport). Zorro boards may route the clockport
+interrupt to a different line.
+
 ### How It Works
 
 1. **ddm.library** provides the core framework: `struct device`,
@@ -100,8 +147,9 @@ Copy the output files to your Amiga:
 - `LIBS:` — ddm.library, spi.library, mmc.library, parallelport.library,
   clockport.library, cia-parallelport.library, par-spi.library,
   gayle-clockport.library, spider.library
-- `DEVS:` — mmc-spi.device, ddm.conf, a1200.dts
-  (`ddm.conf` and `a1200.dts` live in `boards/`; copy them to `DEVS:`)
+- `DEVS:` — mmc-spi.device, ddm.conf, a1200.dts, zorro-overlays.dts
+  (`ddm.conf`, `a1200.dts`, and `zorro-overlays.dts` live in `boards/`;
+  copy them to `DEVS:`)
 
 ## Disclaimer
 
